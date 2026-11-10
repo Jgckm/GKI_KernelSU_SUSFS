@@ -1,0 +1,125 @@
+# 专用构建：小米 15 Pro（haotian / 2410DPN6CC）+ HyperOS 4
+#
+# 目标设备实测参数（2026-11-10 用 adb 核实）：
+#   - HyperOS 4 / Android 17（SDK 37），OS4.0.0.19.XOBCNXM，安全补丁 2026-09-01
+#   - 原厂内核 6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k，4K 页，A/B（当前 slot _a）
+#   - KMI android15-8，原厂 CONFIG_LOCALVERSION="-4k"
+#
+# 为什么只构建 6.6.118：
+#   - Android 15 GKI 6.6 线中 6.6.118 对应 ACK 分支 android15-6.6-2026-01
+#     （data/android15/6.6.json: 2026-01 -> 6.6.118），与设备原厂内核子版本一致。
+#   - main.yml 会构建 5 个 Android 版本 x 十几个子版本（80+ jobs）；本工作流复用 build.yml，
+#     只跑 1 个目标 job，省时间也避免构建无关内核。
+#
+# 用法：Actions -> 内核构建 - 小米15Pro (6.6.118) -> Run workflow
+# 产物：<KSU变体>_kernel-android15-6.6-118（内含 AnyKernel3.zip / boot.img / Image）
+#       + SukiSU Manager APK + SUSFS 模块（get-manager 工作流）
+#
+# 注意：这只是构建入口，不改动 build.yml 的任何上游逻辑。
+
+name: 内核构建 - 小米15Pro (6.6.118)
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ==================== 功能选项 ====================
+      droidspaces:
+        description: "Droidspaces 容器支持（678 官方推荐；bootloop 时换 123 / 345）"
+        required: true
+        type: choice
+        options:
+          - "678"
+          - "123"
+          - "345"
+          - "off"
+        default: "678"
+      droidspaces_ntsync:
+        description: "Droidspaces NTSync（可选；6.6 上补丁可能失败，失败就关掉重编）"
+        required: true
+        type: boolean
+        default: false
+      use_zram:
+        description: "ZRAM 增强（LZ4KD/LZ4K；原厂是 zram=m 未增强，首次刷机建议关闭）"
+        required: true
+        type: boolean
+        default: false
+      cve_2026_43499_patch:
+        description: "GhostLock / CVE-2026-43499 rtmutex 修复链（6.6.118 < 6.6.144，默认开启）"
+        required: false
+        type: boolean
+        default: true
+      artifact_upload_mode:
+        description: "产物上传模式（要 boot.img 选“上传全部”）"
+        required: true
+        type: choice
+        options:
+          - "上传全部"
+          - "仅上传 AnyKernel3.zip"
+        default: "上传全部"
+      version:
+        description: "内核版本伪装后缀（默认与设备原厂 uname -r 完全一致；清空则不伪装）"
+        required: false
+        type: string
+        default: "-android15-8-gb9cc6ec16bc8-abogki536571621-4k"
+      build_time:
+        description: "自定义构建时间（默认与设备原厂内核编译时间一致；N/留空=当前 UTC）"
+        required: false
+        type: string
+        default: "Mon Jul 20 11:15:20 UTC 2026"
+
+jobs:
+  # 与内核 KSU 版本匹配的 SukiSU 管理器 APK 和 SUSFS 模块
+  get-manager:
+    uses: ./.github/workflows/get-manager.yml
+    secrets: inherit
+    with:
+      kernelsu_variant: SukiSU
+
+  # 单目标构建：android15-6.6-2026-01 = 6.6.118
+  build-kernel-6-6-118:
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      android_version: "android15"
+      kernel_version: "6.6"
+      sub_level: "118"
+      os_patch_level: "2026-01"
+
+      # SukiSU（builtin 分支 = SUSFS inline hooks）
+      ksu_variant: "SukiSU"
+      ksu_mode: "关闭"          # 关闭 = 同时集成 KSU + SUSFS（不是“禁用”）
+      enable_susfs: true
+
+      # 自定义构建信息：伪装成设备原厂内核版本串，方便通过用户态检查
+      # （模块加载并不依赖该版本串：CONFIG_MODVERSIONS=y 时内核会忽略 vermagic 的版本前半段，
+      #   见 kernel/module/version.c 的 same_magic()；真正要紧的是符号 CRC / KMI 不变）
+      version: ${{ inputs.version }}
+      revision: "r1"
+      build_time: ${{ inputs.build_time || 'Mon Jul 20 11:15:20 UTC 2026' }}
+
+      # 功能开关（首刷最小化，除了 Droidspaces 本身都保持关闭）
+      use_zram: ${{ inputs.use_zram }}
+      use_bbg: false
+      use_kpm: "disabled (关闭)"
+      use_rekernel: false
+      use_nomount: false
+      use_networking: false
+      cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
+      export_susfs_patches: false
+      supp_op: false
+
+      # Droidspaces 容器支持：会启用 SYSVIPC / POSIX_MQUEUE / IPC_NS / PID_NS / USER_NS / DEVTMPFS
+      # 并打 SYSVIPC kABI padding 补丁（否则原厂 vendor 模块会因 ABI 变化拒载导致 bootloop）
+      droidspaces: ${{ inputs.droidspaces }}
+      droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
+
+      # 产物：boot.img / boot-gz.img / boot-lz4.img / AnyKernel3.zip 全部上传
+      artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
