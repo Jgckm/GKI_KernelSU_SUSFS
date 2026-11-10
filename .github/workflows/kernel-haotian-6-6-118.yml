@@ -32,12 +32,11 @@ on:
     inputs:
       # ==================== 功能选项 ====================
       droidspaces:
-        description: "Droidspaces 容器支持（678 官方推荐；bootloop 时换 123 / 345）"
+        description: "Droidspaces 容器支持（678 首选；bootloop 时换 345。注意 123 在 android15-6.6 上打不上，已移除）"
         required: true
         type: choice
         options:
           - "678"
-          - "123"
           - "345"
           - "off"
         default: "678"

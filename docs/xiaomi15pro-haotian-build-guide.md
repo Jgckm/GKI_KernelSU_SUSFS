@@ -15,8 +15,8 @@
 | 为什么是 6.6.118 | 设备原厂内核 `6.6.118-android15-8-...-4k`；仓库 `data/android15/6.6.json` 明确 `2026-01 ↔ 6.6.118`；2026-11-06 的最新 Release `v2.3.0-r10` 里仍有 `android15-6.6.118-2026-01-*` 产物，构建链可用 |
 | KMI / 页大小 | `android15-8`，4K 页（`CONFIG_LOCALVERSION="-4k"`、`pagesize=4096`） |
 | KSU 变体 | `SukiSU`（builtin 分支 = SUSFS inline hooks） |
-| Droidspaces | 选 `678`（上游 Droidspaces 官方文档推荐先试 6/7/8 padding 槽；bootloop 再换 `123` → `345`） |
-| NTSync | 先关。失败了再单独试，不要和第一次刷机叠加变量 |
+| Droidspaces | 选 `678`（上游 Droidspaces 官方文档推荐先试 6/7/8 padding 槽；本树实测可干净应用；bootloop 再换 `345`。**不要选 123**：在 android15-6.6 的 `sched.h` 上打不上） |
+| NTSync | 先关（补丁已验证能干净打上，确认内核能开机后再单独开它，不要和首刷叠加变量） |
 | 其它增强 | 首刷全关（`use_zram` / `use_bbg` / `use_networking` / `use_nomount` / `use_rekernel` / `use_kpm`） |
 
 ### 0.2 但你先看这个：HyperOS 4 目前大概率刷了不能开机 ⚠️
@@ -66,6 +66,7 @@ fastboot reboot
 2. 仓库 `data/android15/6.6.json`：`2026-01 → 6.6.118`、`2026-04 → 6.6.127`、`2026-07 → 6.6.139`、`2026-10 → 6.6.143`、`lts → 6.6.144`。`build.yml` 用 `repo init -b common-<android>-<kernel>-<os_patch_level>`，所以 `os_patch_level` 选 **`2026-01`** 才会检出 6.6.118。
 3. 原厂内核同子版本是刚需：厂商 `vendor_dlkm` / `system_dlkm` 模块是按 6.6.118 这套 ABI 编译的。**不要**追新去选 6.6.127/143，除非你同时重编并刷入所有模块。
 4. 注意日期：设备安全补丁 `2026-09-01` 是 **ROM 属性**，不要拿它当 `os_patch_level`；`os_patch_level` 是 ACK 月度分支编号。
+5. 本次还做了独立核对：`android15-6.6-2026-01` 目前仍是**活跃分支**（镜像 packed-refs 里有，无 deprecated/ 前缀），实际 sparse 检出后 `Makefile` 为 `VERSION=6 PATCHLEVEL=6 SUBLEVEL=118`；`gki_defconfig` 里确实是 `CONFIG_LOCALVERSION="-4k"`。上游 Release `v2.3.0-r10`（2026-11-06）里也仍有 `android15-6.6.118-2026-01-*` 产物，说明这条构建链目前可用。
 
 ---
 
@@ -84,7 +85,7 @@ fastboot reboot
 | `sub_level` / `os_patch_level` | `118` / `2026-01` |
 | `ksu_variant` / `ksu_mode` | `SukiSU` / `关闭`（关闭=同时集成 KSU+SUSFS） |
 | `enable_susfs` | `true` |
-| `droidspaces` | 默认 `678`（可选 `off/678/123/345`） |
+| `droidspaces` | 默认 `678`（可选 `off/678/345`；`123` 在 6.6 上打不上，已从选项移除） |
 | `droidspaces_ntsync` | 默认 `false` |
 | `use_zram`/`use_bbg`/`use_networking`/`use_nomount`/`use_rekernel`/`use_kpm`/`supp_op` | 全部关闭 |
 | `cve_2026_43499_patch` | 默认 `true`（6.6.118 < 6.6.144，需要修；纯 rtmutex 内部改动，不影响 ABI） |
@@ -116,7 +117,16 @@ Documentation/resources/kernel-patches/GKI/below-kernel-6.12/
 └── 002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch  ← 5.10 及以下才要，6.6 不需要
 ```
 
-工作流 `droidspaces=678/123/345` 就是三选一，`off` 关闭。**不要**开 `CONFIG_CFS_BANDWIDTH` / `CONFIG_CGROUP_PIDS`：它们会动调度器/cgroup 结构，连 padding 补丁都救不了（工作流没开，保持即可）。
+工作流 `droidspaces=678/345/off` 就是槽位三选一；**`123` 在 android15-6.6 上不可用**。
+
+> 本树实测（在真实 6.6.118 `include/linux/sched.h` 上 `patch -p1 --dry-run`）：
+> - `678`：干净应用（hunk1 offset -1，hunk2 offset 11 / fuzz 2），因为 task_struct KABI 区是 `ANDROID_KABI_USE(1, dmabuf_info)` + `RESERVE(2)..RESERVE(8)`，6/7/8 空闲；
+> - `345`：也能打上（同样靠 fuzz），槽 3/4/5 空闲，可作回退；
+> - `123`：**hunk #2 FAILED**（它期望上下文是 `RESERVE(1)`，实际第 1 槽已被 `dmabuf_info` 占用）。
+>
+> 危险点：`build.yml` 在 Droidspaces 补丁打失败时**只打 warning 然后继续编译**。所以如果选 123，会变成一个“开了 SYSVIPC 但没打 padding”的内核 —— task_struct 布局变化、符号 CRC 变化，刷进去大概率 bootloop。**千万别选 123**（本工作流已把它从选项里删掉）。
+
+**不要**开 `CONFIG_CFS_BANDWIDTH` / `CONFIG_CGROUP_PIDS`：它们会动调度器/cgroup 结构，连 padding 补丁都救不了（工作流没开，保持即可）。
 
 ### 4.2 模块 vermagic：版本串不是关键，CRC 才是
 
@@ -133,7 +143,7 @@ Documentation/resources/kernel-patches/GKI/below-kernel-6.12/
 - `use_networking`：BBRv3/IPSet/CIFS 等一堆网络补丁，非容器必需。
 - `use_nomount` / `use_rekernel` / `use_kpm`：都是额外内核模块/补丁，先不碰。
 - `cve_2026_43499_patch`：GhostLock/CVE-2026-43499 + CVE-2026-53163 修复链；6.6.118 低于 6.6.144，仍需打；只改 rtmutex 内部实现，不影响 ABI。如果编译因它失败，把它改成 `false` 再编一次。
-- `droidspaces_ntsync`：NTSync 补丁（另一份外部 patch），在 6.6 上不一定适配。先关，容器跑起来后再考虑。
+- `droidspaces_ntsync`：NTSync 补丁（新增 `drivers/misc/ntsync.c` + `include/uapi/linux/ntsync.h`）。已在本树 6.6.118 上 dry-run 通过（hunk 全部匹配、无额外 Kconfig 依赖），可选；编译/运行未本地验证，失败就关。启用后容器里 Wine/Proton 的 NT 同步原语可走内核。
 
 ---
 
@@ -248,7 +258,7 @@ adb shell "cat /proc/version"
 2. 管理器里安装 `ksu_module_susfs.zip`（SUSFS 模块）→ 重启 → 管理器里确认 SUSFS 已启用。
 3. 装 [Droidspaces APK](https://github.com/ravindu644/Droidspaces-OSS/releases/latest) → 授权 root → 装后端 → 重启 →
    打开 App **Settings → Requirements → Check Requirements**（或终端 `droidspaces check`），"must have"/"recommended" 应通过。
-   - 若卡开机/bootloop：换 `droidspaces=123` 或 `345` 重新构建再试（这是 padding 槽不同）。
+   - 若卡开机/bootloop：换 `droidspaces=345` 重新构建再试（**不要选 123**，原因见 4.1）。
 4. 检查原厂模块是否正常（重点：显示/触摸/WiFi/相机/通话）：这些驱动都在 `vendor_dlkm`，如果它们加载失败通常会表现为开机卡界面或硬件不可用。
 
 ---
@@ -275,7 +285,7 @@ fastboot flash vbmeta .\vbmeta_stock.img
 | **HyperOS 4 上自定义 GKI 直接不开机** | **高** | 同机型 issue #251 实测失败；Android 17 的红米 K90 同样失败；暂无成功案例 |
 | 拿不到 OS4.0.0.19 原厂 boot.img | 中高 | 公开站无该版本线刷包；必须自己从 OTA 提取或临时 root dd |
 | bootloader 实为锁定 | 中 | prop 自相矛盾，必须 fastboot 实测 |
-| Droidspaces kABI 补丁槽不匹配 → 模块拒载 bootloop | 中 | 678 不行换 123/345；首刷可先用 `off` 验证 |
+| Droidspaces kABI 补丁槽不匹配 → 模块拒载 bootloop | 中 | 678 不行换 345（**不要 123**）；首刷可先用 `off` 验证 |
 | AVB 校验导致不启动 | 中 | 优先方案 A（原厂 boot 重打包）；必要时关 AVB |
 | OTA 覆盖内核丢 root | 高（长期） | A/B OTA 会写另一槽，升级后需重刷 |
 
@@ -295,7 +305,8 @@ fastboot flash vbmeta .\vbmeta_stock.img
   不需要就删除该文件。
 - **内核版本伪装**：工作流 `version` 输入默认已伪装成原厂串；不需要就清空。
 - **ZRAM/BBG/网络增强/NoMount/Re-Kernel/KPM**：确认基础内核能开机后，再在工作流里逐个打开验证。
-- **NTSync**：Droidspaces 可选加速项；在 6.6 上补丁不一定适配，失败就关。
+- **NTSync**：Droidspaces 可选增强；补丁已在 6.6.118 上 dry-run 通过，可打开；若编译报 API 缺失就关掉（不影响 SYSVIPC 容器功能）。
+- **IPv6 NAT / macvlan**：上游 GKI-safe 清单里还有 3 个可选项工作流没加 —— `CONFIG_IP6_NF_NAT`、`CONFIG_IP6_NF_TARGET_MASQUERADE`（NAT66）、`CONFIG_MACVLAN`（macvlan 网络模式）。需要的话可自行在 `build.yml` 的 Droidspaces 块补三行 `enable_config_if_defined`（与 kABI 无关）；不需要就保持现状。
 
 ---
 
