@@ -16,8 +16,9 @@
 | KMI / 页大小 | `android15-8`，4K 页（`CONFIG_LOCALVERSION="-4k"`、`pagesize=4096`） |
 | KSU 变体 | `SukiSU`（builtin 分支 = SUSFS inline hooks） |
 | Droidspaces | 选 `678`（上游 Droidspaces 官方文档推荐先试 6/7/8 padding 槽；本树实测可干净应用；bootloop 再换 `345`。**不要选 123**：在 android15-6.6 的 `sched.h` 上打不上） |
-| NTSync | 先关（补丁已验证能干净打上，确认内核能开机后再单独开它，不要和首刷叠加变量） |
-| 其它增强 | 首刷全关（`use_zram` / `use_bbg` / `use_networking` / `use_nomount` / `use_rekernel` / `use_kpm`） |
+| NTSync | 先关（补丁已验证能干净打上；确认内核能开机后再单独开它） |
+| 已开启的增强 | `use_zram`（ZRAM 增强）、`use_bbg`（BBG 防格机）、`use_networking`（网络增强）、`cve_2026_43499_patch`（GhostLock 修复）默认全开 |
+| 保持关闭 | `use_nomount` / `use_rekernel` / `use_kpm`（额外模块/补丁，非必需） |
 
 ### 0.2 但你先看这个：HyperOS 4 目前大概率刷了不能开机 ⚠️
 
@@ -87,8 +88,11 @@ fastboot reboot
 | `enable_susfs` | `true` |
 | `droidspaces` | 默认 `678`（可选 `off/678/345`；`123` 在 6.6 上打不上，已从选项移除） |
 | `droidspaces_ntsync` | 默认 `false` |
-| `use_zram`/`use_bbg`/`use_networking`/`use_nomount`/`use_rekernel`/`use_kpm`/`supp_op` | 全部关闭 |
+| `use_zram` | 默认 `true`（ZRAM 增强：builtin zram + LZ4KD/LZ4K） |
+| `use_bbg` | 默认 `true`（BBG 防格机） |
+| `use_networking` | 默认 `true`（BBRv3 / IPSet / CAKE / CIFS） |
 | `cve_2026_43499_patch` | 默认 `true`（6.6.118 < 6.6.144，需要修；纯 rtmutex 内部改动，不影响 ABI） |
+| `use_nomount` / `use_rekernel` / `use_kpm` / `supp_op` | 保持关闭 |
 | `version` | 默认 `-android15-8-gb9cc6ec16bc8-abogki536571621-4k`，让产物 `uname -r` 与你的原厂内核**完全一致**（伪装/隐藏用途；不需要就清空） |
 | `build_time` | 默认 `Mon Jul 20 11:15:20 UTC 2026`（与原厂 `#1 SMP PREEMPT ...` 一致；可留空用当前时间） |
 | `artifact_upload_mode` | 默认 `上传全部`（要拿 `boot.img`） |
@@ -136,23 +140,35 @@ Documentation/resources/kernel-patches/GKI/below-kernel-6.12/
 - 所以 `uname -r` 不同不会导致原厂模块拒载；真正会导致拒载的是**符号 CRC 变化**（ABI 布局变了），这正是 4.1 里 kABI padding 补丁要解决的问题。
 - `version` 输入的作用主要是**伪装/隐藏**（让 `uname -r` 看起来就是原厂），不是开机必需。默认帮你填成原厂串，不想要就清空。
 
-### 4.3 首刷为什么其它全关
+### 4.3 四个已开启的开关（ZRAM / BBG / 网络增强 / CVE）
 
-- `use_zram`：会替换 ZRAM/LZ4 实现并改配置，原厂是 `zram=m` 未增强，首刷叠加变量风险高。
-- `use_bbg`：BBG 防格机补丁，非必需。
-- `use_networking`：BBRv3/IPSet/CIFS 等一堆网络补丁，非容器必需。
-- `use_nomount` / `use_rekernel` / `use_kpm`：都是额外内核模块/补丁，先不碰。
-- `cve_2026_43499_patch`：GhostLock/CVE-2026-43499 + CVE-2026-53163 修复链；6.6.118 低于 6.6.144，仍需打；只改 rtmutex 内部实现，不影响 ABI。如果编译因它失败，把它改成 `false` 再编一次。
-- `droidspaces_ntsync`：NTSync 补丁（新增 `drivers/misc/ntsync.c` + `include/uapi/linux/ntsync.h`）。已在本树 6.6.118 上 dry-run 通过（hunk 全部匹配、无额外 Kconfig 依赖），可选；编译/运行未本地验证，失败就关。启用后容器里 Wine/Proton 的 NT 同步原语可走内核。
+- **`use_zram`（ZRAM 增强）**：把 ZRAM 改成 builtin，替换 LZ4/LZ4HC、加 LZ4KD/LZ4K 算法和 zram 补丁，提升内存压缩/交换性能。注意原厂是 `zram=m`（system_dlkm 里的 `zram.ko`），改成 builtin 后系统再 modprobe 原厂 `zram.ko` 会报错（一般只是日志里一行失败，不影响使用，但这是四项里改动最大的一项）。若开机异常/卡顿/重启，**第一个关它**重编。
+- **`use_bbg`（BBG 防格机）**：Baseband-guard LSM，阻止从 `su` 启动的进程对非白名单块分区做写入/改属性/破坏性 ioctl，保护 modem、基带、bootloader 这类分区不被恶意脚本抹掉（真正的“格机”场景）。ABI 安全（LSM blob 动态分配，不改结构体布局），上游 Release `v2.3.0-r10` 也是带 BBG 构建的。详见 4.4。
+- **`use_networking`（网络增强）**：BBRv3、IPSet、FQ/FQ_CODEL/CAKE qdisc、connmark、TTL/HL、WireGuard、CIFS。提升网络吞吐/延迟，并让容器/Docker 的 netfilter/IPSet 能力更完整。上游 Release 就是开启状态，编译可行；若网络/耗电异常可关闭排查。
+- **`cve_2026_43499_patch`（GhostLock 修复）**：CVE-2026-43499 + CVE-2026-53163 的 rtmutex 修复链；6.6.118 低于 6.6.144，需要打。只改 rtmutex 内部实现，不影响 ABI。若编译报补丁失败就关掉。
+- `droidspaces_ntsync` 保持默认关：补丁已验证能在 6.6.118 上干净应用，等容器跑通后再单独开。
+
+> 出问题时的排查顺序（一次只改一个）：先关 `use_zram` → 再关 `use_networking` → 再关 `use_bbg` → 最后关 `cve_2026_43499_patch`。
+
+### 4.4 BBG 防格机到底防什么
+
+BBG（[vc-teahouse/Baseband-guard](https://github.com/vc-teahouse/Baseband-guard)）是内核 LSM，在文件写路径上拦截：
+
+- 从 `su` 启动的进程（untrusted）对**非白名单分区**的 `write`、`setattr`（chmod/chown 等）、破坏性 `ioctl`（`BLKDISCARD`/`BLKZEROOUT`/`BLKPG`/`BLKRRPART` 等）一律返回 `-EPERM`；
+- 白名单默认包含 `boot`、`init_boot`、`vendor_boot`、`vendor_kernel_boot`、`dtbo`、`userdata`、`cache`、`metadata`、`misc`、`vbmeta*`、`recovery`，所以**正常刷内核/刷机不受影响**；
+- 也就是说它保护的是 **modem / fsc / fsg / persist / xbl / abl** 等基带和 bootloader 分区不被抹掉，**不保护 `boot` 分区**（防刷坏 boot 还是要靠备份 + 回滚）。
+
+可选加强（工作流没开）：`CONFIG_BBG_BLOCK_BOOT` / `CONFIG_BBG_BLOCK_RECOVERY` 会把 boot/recovery 也纳入保护，但这样在 Android 里就无法用 App 刷内核，只能 fastboot，一般不建议开。
+
+验证是否生效：`adb shell dmesg | findstr baseband_guard` 能看到 `baseband_guard ... version` 之类的行；root 下尝试 `dd if=/dev/zero of=/dev/block/by-name/modem` 应被拒绝（**别真写**，只在确认要测试时用）。
 
 ---
 
 ## 5. 怎么构建
 
 1. 仓库：你的 fork `Jgckm/GKI_KernelSU_SUSFS`（默认分支 `dev`，Actions 已确认处于 enabled）。先点 **Sync fork** 同步上游；本次新增的工作流已提交（见第 12 节）。
-2. 打开 **Actions → 内核构建 - 小米15Pro (6.6.118) → Run workflow**，参数按默认即可：
-   - 第一次建议 `droidspaces=678`、`droidspaces_ntsync=false`、`use_zram=false`、其余默认。
-   - 如果只是想先验证“能不能刷开机”，可以把 `droidspaces` 改成 `off`（纯 SukiSU+SUSFS），这样少一个变量；确认能开机后再构建 678。
+2. 打开 **Actions → 内核构建 - 小米15Pro (6.6.118) → Run workflow**，参数按默认即可（默认：`droidspaces=678`、`use_zram=true`、`use_bbg=true`、`use_networking=true`、`cve=true`）：
+   - 如果只想先验证“这台机器到底能不能刷开机”，可以把 `droidspaces` 改成 `off`（纯 SukiSU+SUSFS），并暂时关掉 `use_zram`/`use_networking`，用最小内核测试；确认能开机后再开回来。
 3. 等构建完成（单 job，约 30–60 分钟；失败会有 `*-Build-Logs` artifact，含编译日志）。
 4. 下载 artifacts：
    - `SukiSU_kernel-android15-6.6-118`：内含 `android15-6.6.118-2026-01-AnyKernel3.zip`、`android15-6.6.118-2026-01-boot.img`、`boot-gz.img`、`boot-lz4.img`、`Image`。
@@ -286,6 +302,9 @@ fastboot flash vbmeta .\vbmeta_stock.img
 | 拿不到 OS4.0.0.19 原厂 boot.img | 中高 | 公开站无该版本线刷包；必须自己从 OTA 提取或临时 root dd |
 | bootloader 实为锁定 | 中 | prop 自相矛盾，必须 fastboot 实测 |
 | Droidspaces kABI 补丁槽不匹配 → 模块拒载 bootloop | 中 | 678 不行换 345（**不要 123**）；首刷可先用 `off` 验证 |
+| ZRAM 改 builtin 后，系统再加载原厂 `zram.ko` 报错 | 中 | 一般只在日志报错、不影响使用；若开机异常/卡顿先关 `use_zram` |
+| BBG 误伤正常写入（仅拦截 su 进程对非白名单分区） | 低 | `dmesg | findstr baseband_guard` 可看到 deny 详情；异常就关 `use_bbg` |
+| 网络增强补丁导致网络/耗电异常 | 低 | 关 `use_networking` 重编排查 |
 | AVB 校验导致不启动 | 中 | 优先方案 A（原厂 boot 重打包）；必要时关 AVB |
 | OTA 覆盖内核丢 root | 高（长期） | A/B OTA 会写另一槽，升级后需重刷 |
 
@@ -304,7 +323,7 @@ fastboot flash vbmeta .\vbmeta_stock.img
   ```
   不需要就删除该文件。
 - **内核版本伪装**：工作流 `version` 输入默认已伪装成原厂串；不需要就清空。
-- **ZRAM/BBG/网络增强/NoMount/Re-Kernel/KPM**：确认基础内核能开机后，再在工作流里逐个打开验证。
+- **ZRAM 增强 / BBG 防格机 / 网络增强 / CVE 修复**：工作流默认已全部开启；如果开机异常，按 4.3 的顺序逐个关闭排查（改动最大的是 ZRAM）。
 - **NTSync**：Droidspaces 可选增强；补丁已在 6.6.118 上 dry-run 通过，可打开；若编译报 API 缺失就关掉（不影响 SYSVIPC 容器功能）。
 - **IPv6 NAT / macvlan**：上游 GKI-safe 清单里还有 3 个可选项工作流没加 —— `CONFIG_IP6_NF_NAT`、`CONFIG_IP6_NF_TARGET_MASQUERADE`（NAT66）、`CONFIG_MACVLAN`（macvlan 网络模式）。需要的话可自行在 `build.yml` 的 Droidspaces 块补三行 `enable_config_if_defined`（与 kABI 无关）；不需要就保持现状。
 

@@ -12,6 +12,8 @@
 #     只跑 1 个目标 job，省时间也避免构建无关内核。
 #
 # 用法：Actions -> 内核构建 - 小米15Pro (6.6.118) -> Run workflow
+# 默认配置（按设备 owner 要求全开）：SukiSU + SUSFS + Droidspaces(678)
+#   + ZRAM 增强 + BBG 防格机 + 网络增强（BBRv3/IPSet/CAKE/CIFS）+ CVE-2026-43499 修复
 # 产物：<KSU变体>_kernel-android15-6.6-118（内含 AnyKernel3.zip / boot.img / Image）
 #       + SukiSU Manager APK + SUSFS 模块（get-manager 工作流）
 #
@@ -41,15 +43,25 @@ on:
           - "off"
         default: "678"
       droidspaces_ntsync:
-        description: "Droidspaces NTSync（可选；6.6 上补丁可能失败，失败就关掉重编）"
+        description: "Droidspaces NTSync（可选；6.6.118 上补丁已验证可应用，容器跑通后建议开启）"
         required: true
         type: boolean
         default: false
       use_zram:
-        description: "ZRAM 增强（LZ4KD/LZ4K；原厂是 zram=m 未增强，首次刷机建议关闭）"
+        description: "ZRAM 增强（LZ4KD/LZ4K，默认开启；若开机异常/卡顿可关闭重编）"
         required: true
         type: boolean
-        default: false
+        default: true
+      use_bbg:
+        description: "BBG 防格机（Baseband-guard LSM，默认开启）"
+        required: true
+        type: boolean
+        default: true
+      use_networking:
+        description: "网络增强（BBRv3 / IPSet / Qdisc / CIFS，默认开启）"
+        required: true
+        type: boolean
+        default: true
       cve_2026_43499_patch:
         description: "GhostLock / CVE-2026-43499 rtmutex 修复链（6.6.118 < 6.6.144，默认开启）"
         required: false
@@ -104,13 +116,14 @@ jobs:
       revision: "r1"
       build_time: ${{ inputs.build_time || 'Mon Jul 20 11:15:20 UTC 2026' }}
 
-      # 功能开关（首刷最小化，除了 Droidspaces 本身都保持关闭）
+      # 功能开关（按你的要求全部开启：ZRAM 增强 + BBG 防格机 + 网络增强 + CVE 修复）
+      # 如果开机异常，优先按 zram -> networking -> bbg 的顺序关闭排查
       use_zram: ${{ inputs.use_zram }}
-      use_bbg: false
+      use_bbg: ${{ inputs.use_bbg }}
       use_kpm: "disabled (关闭)"
       use_rekernel: false
       use_nomount: false
-      use_networking: false
+      use_networking: ${{ inputs.use_networking }}
       cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
       export_susfs_patches: false
       supp_op: false
